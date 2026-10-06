@@ -103,6 +103,33 @@ class LoadStrategyChain:
             ) from exc
 
 
+def _load_collectively(
+    strategy: LoadStrategy, result: LoadResult, ctx: LoadContext
+) -> LoadResult:
+    error = None
+    try:
+        result = strategy.load(result, ctx)
+    except Exception as exc:
+        error = exc
+
+    try:
+        states = ctx.adapter.all_gather_state(
+            (error is None, isinstance(error, StrategyRecoveryError))
+        )
+    except Exception as exc:
+        raise StrategyRecoveryError("Loading rank agreement failed") from exc
+    if any(fatal for _, fatal in states):
+        raise StrategyRecoveryError("A rank could not recover its model") from error
+    if not all(success for success, _ in states):
+        # Successful peers hold processed weights and must rebuild before disk loading.
+        mutated = not isinstance(error, StrategyFailed) or error.mutated
+        raise StrategyFailed(
+            str(error) if error else "Another rank failed loading",
+            mutated=mutated,
+        ) from error
+    return result
+
+
 def execute_load_strategies(
     model: nn.Module,
     ctx: LoadContext,
@@ -110,6 +137,10 @@ def execute_load_strategies(
 ) -> nn.Module:
     """Execute an ordered policy using the common fallback lifecycle."""
     eligible = [strategy for strategy in strategies if strategy.is_available(ctx)]
+    collective = ctx.adapter.collective_loading is True
+    if collective:
+        policies = ctx.adapter.all_gather_state(tuple(s.name for s in eligible))
+        eligible = [s for s in eligible if all(s.name in policy for policy in policies)]
     logger.info(f"Eligible loaders: {[strategy.name for strategy in eligible]}")
 
     result = LoadResult(value=model, model=model)
@@ -121,7 +152,11 @@ def execute_load_strategies(
         for strategy in eligible:
             logger.info(f"[Worker {ctx.global_rank}] Trying strategy: {strategy.name}")
             try:
-                result = strategy.load(result, ctx)
+                result = (
+                    _load_collectively(strategy, result, ctx)
+                    if collective
+                    else strategy.load(result, ctx)
+                )
                 publish_source_if_supported(result, ctx)
                 span.set_attribute("weight_loading_strategy", strategy.name)
                 return result.value

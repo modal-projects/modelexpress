@@ -37,6 +37,18 @@ if TYPE_CHECKING:
 class SglangAdapter(EngineAdapter):
     """Adapter that maps strategy hooks onto SGLang's native loader APIs."""
 
+    collective_loading = True
+
+    def all_gather_state(self, state) -> tuple[object, ...]:
+        if not torch.distributed.is_initialized():
+            return (state,)
+        from sglang.srt.distributed import get_world_group
+
+        group = get_world_group().cpu_group
+        states = [None] * torch.distributed.get_world_size(group)
+        torch.distributed.all_gather_object(states, state, group=group)
+        return tuple(states)
+
     def __init__(
         self,
         load_config: LoadConfig,
