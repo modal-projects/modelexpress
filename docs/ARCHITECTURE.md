@@ -14,6 +14,13 @@ ModelExpress is a Rust-based model cache management service and GPU-to-GPU model
 - **Model Cache Service** - A sidecar alongside inference solutions (vLLM, SGLang, NVIDIA Dynamo) that accelerates model downloads from HuggingFace, NGC, and GCS. Model lifecycle state lives in a distributed registry — Redis or Kubernetes CRDs (`ModelCacheEntry`), selected via `MX_METADATA_BACKEND` — so multiple server replicas can coordinate without a shared-filesystem database. LRU cache eviction runs off the same registry.
 - **P2P Weight Transfer** - GPU-to-GPU model weight transfers between inference replicas using NVIDIA NIXL over RDMA/InfiniBand, enabling ~15-second transfers for 681GB models. The Python client includes engine adapters for vLLM and SGLang.
 
+SGLang ranks agree on eligible loading strategies and each strategy's outcome
+before publishing weights. If one rank needs fallback, successful peers discard
+their processed target weights and reinitialize before continuing together. This
+allows collective native loaders such as fastsafetensors to run on every rank;
+an unrecoverable rank error aborts loading instead of falling back.
+
+
 ### Current Status
 
 | Model | Status | Transfer Time | Notes |

@@ -75,6 +75,8 @@ class EngineAdapter:
     safe extension points around an already-selected strategy.
     """
 
+    collective_loading = False
+
     @gated_capability
     def build_identity(self) -> p2p_pb2.SourceIdentity:
         """Return the stable identity used to match compatible source workers."""
