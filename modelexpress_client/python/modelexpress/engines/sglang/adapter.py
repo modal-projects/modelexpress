@@ -28,6 +28,15 @@ from ...tensor_utils import (
 
 logger = logging.getLogger("modelexpress.engines.sglang.adapter")
 
+_LEGACY_PARALLEL_GETTERS = {
+    "world_group": "get_world_group",
+    "tp_size": "get_tensor_model_parallel_world_size",
+    "tp_rank": "get_tensor_model_parallel_rank",
+    "pp_size": "get_pipeline_model_parallel_world_size",
+    "pp_rank": "get_pipeline_model_parallel_rank",
+    "moe_ep_size": "get_moe_expert_parallel_world_size",
+}
+
 if TYPE_CHECKING:
     from sglang.srt.configs.device_config import DeviceConfig
     from sglang.srt.configs.load_config import LoadConfig
@@ -42,9 +51,7 @@ class SglangAdapter(EngineAdapter):
     def all_gather_state(self, state) -> tuple[object, ...]:
         if not torch.distributed.is_initialized():
             return (state,)
-        from sglang.srt.distributed import get_world_group
-
-        group = get_world_group().cpu_group
+        group = _get_parallel_attr("world_group").cpu_group
         states = [None] * torch.distributed.get_world_size(group)
         torch.distributed.all_gather_object(states, state, group=group)
         return tuple(states)
@@ -81,9 +88,7 @@ class SglangAdapter(EngineAdapter):
         ):
             return 0
 
-        from sglang.srt import distributed
-
-        return int(distributed.get_world_group().local_rank)
+        return int(_get_parallel_attr("world_group").local_rank)
 
     def get_device_id(self) -> int:
         gpu_id = getattr(self.device_config, "gpu_id", None)
@@ -322,15 +327,9 @@ def build_sglang_source_identity(model_config: ModelConfig) -> p2p_pb2.SourceIde
         mx_source_type=p2p_pb2.MX_SOURCE_TYPE_WEIGHTS,
         model_name=_get_model_name(model_config),
         backend_framework=p2p_pb2.BACKEND_FRAMEWORK_SGLANG,
-        tensor_parallel_size=_get_parallel_size(
-            "get_tensor_model_parallel_world_size"
-        ),
-        pipeline_parallel_size=_get_parallel_size(
-            "get_pipeline_model_parallel_world_size"
-        ),
-        expert_parallel_size=_get_parallel_size(
-            "get_moe_expert_parallel_world_size"
-        ),
+        tensor_parallel_size=_get_parallel_size("tp_size"),
+        pipeline_parallel_size=_get_parallel_size("pp_size"),
+        expert_parallel_size=_get_parallel_size("moe_ep_size"),
         dtype=_get_dtype(model_config),
         quantization=_get_quantization(model_config),
         revision=_get_revision(model_config),
@@ -365,21 +364,27 @@ def _get_revision(model_config: ModelConfig) -> str:
 
 def _get_parallel_size(name: str) -> int:
     try:
-        from sglang.srt import distributed
-
-        return int(getattr(distributed, name)())
+        return int(_get_parallel_attr(name))
     except Exception:
         return 1
+
+
+def _get_parallel_attr(name: str):
+    try:
+        from sglang.srt.runtime_context import get_parallel
+    except ImportError:
+        from sglang.srt import distributed
+
+        return getattr(distributed, _LEGACY_PARALLEL_GETTERS[name])()
+    return getattr(get_parallel(), name)
 
 
 def _get_sglang_worker_rank(load_config: LoadConfig) -> int:
     """Return the SGLang model-parallel shard key, excluding DP replicas."""
     try:
-        from sglang.srt import distributed
-
-        tp_rank = int(distributed.get_tensor_model_parallel_rank())
-        pp_rank = int(distributed.get_pipeline_model_parallel_rank())
-        tp_size = int(distributed.get_tensor_model_parallel_world_size())
+        pp_rank = int(_get_parallel_attr("pp_rank"))
+        tp_size = int(_get_parallel_attr("tp_size"))
+        tp_rank = int(_get_parallel_attr("tp_rank"))
         return pp_rank * tp_size + tp_rank
     except Exception:
         return int(getattr(load_config, "tp_rank", 0) or 0)

@@ -64,9 +64,9 @@ def test_sglang_adapter_builds_identity_from_sglang_configs():
     with patch(
         "modelexpress.engines.sglang.adapter._get_parallel_size",
         side_effect=lambda name: {
-            "get_tensor_model_parallel_world_size": 8,
-            "get_pipeline_model_parallel_world_size": 2,
-            "get_moe_expert_parallel_world_size": 4,
+            "tp_size": 8,
+            "pp_size": 2,
+            "moe_ep_size": 4,
         }[name],
     ):
         identity = adapter.build_identity()
@@ -97,16 +97,17 @@ def test_sglang_context_separates_worker_rank_from_global_rank(monkeypatch):
     """Keep SGLang's engine worker rank separate from the distributed rank."""
     sglang_mod = ModuleType("sglang")
     srt_mod = ModuleType("sglang.srt")
-    distributed_mod = ModuleType("sglang.srt.distributed")
-    distributed_mod.get_tensor_model_parallel_rank = lambda: 1
-    distributed_mod.get_pipeline_model_parallel_rank = lambda: 2
-    distributed_mod.get_tensor_model_parallel_world_size = lambda: 4
-    distributed_mod.get_world_group = lambda: SimpleNamespace(local_rank=3)
-    srt_mod.distributed = distributed_mod
+    runtime_context_mod = ModuleType("sglang.srt.runtime_context")
+    runtime_context_mod.get_parallel = lambda: SimpleNamespace(
+        tp_rank=1,
+        pp_rank=2,
+        tp_size=4,
+        world_group=SimpleNamespace(local_rank=3),
+    )
 
     monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
     monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
-    monkeypatch.setitem(sys.modules, "sglang.srt.distributed", distributed_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt.runtime_context", runtime_context_mod)
 
     with patch("torch.distributed.is_available", return_value=True), patch(
         "torch.distributed.is_initialized", return_value=True,
@@ -121,6 +122,24 @@ def test_sglang_context_separates_worker_rank_from_global_rank(monkeypatch):
     assert ctx.global_rank == 17
     assert ctx.local_rank == 3
     assert ctx.mx_client.server_url == "mx.example:9000"
+
+
+def test_sglang_context_supports_legacy_distributed_facade(monkeypatch):
+    sglang_mod = ModuleType("sglang")
+    srt_mod = ModuleType("sglang.srt")
+    distributed_mod = ModuleType("sglang.srt.distributed")
+    distributed_mod.get_tensor_model_parallel_rank = lambda: 1
+    distributed_mod.get_pipeline_model_parallel_rank = lambda: 2
+    distributed_mod.get_tensor_model_parallel_world_size = lambda: 4
+    srt_mod.distributed = distributed_mod
+
+    monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
+    monkeypatch.setitem(sys.modules, "sglang.srt.distributed", distributed_mod)
+
+    adapter = SglangAdapter(_load_config(), _model_config(), _device_config())
+
+    assert adapter.get_worker_rank() == 9
 
 
 def test_sglang_is_cuda_alike_uses_sglang_platform_helper(monkeypatch):

@@ -22,8 +22,10 @@ class CollectiveAdapter(EngineAdapter):
 
     def all_gather_state(self, state):
         world = SimpleNamespace(cpu_group=dist.group.WORLD)
-        module = SimpleNamespace(get_world_group=lambda: world)
-        with patch.dict(sys.modules, {"sglang.srt.distributed": module}):
+        module = SimpleNamespace(
+            get_parallel=lambda: SimpleNamespace(world_group=world)
+        )
+        with patch.dict(sys.modules, {"sglang.srt.runtime_context": module}):
             return SglangAdapter.all_gather_state(self, state)
 
     def reinit_for_retry(self, result):
